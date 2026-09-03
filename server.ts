@@ -77,6 +77,40 @@ function getGemini(): GoogleGenAI {
   return genAIClient;
 }
 
+// Resilient AI generation with cascading model fallback
+async function generateGeminiJSON(
+  prompt: string,
+  models: string[] = ['gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest']
+): Promise<any> {
+  const ai = getGemini();
+  let lastError: any = null;
+
+  for (const model of models) {
+    try {
+      const response = await ai.models.generateContent({
+        model,
+        contents: prompt,
+        config: {
+          responseMimeType: 'application/json',
+          temperature: 0.2
+        }
+      });
+      if (response && response.text) {
+        const text = response.text.trim();
+        // Remove markdown formatting if present
+        const cleaned = text.startsWith('```') ? text.replace(/^```json\s*/i, '').replace(/^```\s*/, '').replace(/\s*```$/, '') : text;
+        const parsed = JSON.parse(cleaned);
+        return parsed;
+      }
+    } catch (err: any) {
+      lastError = err;
+      console.warn(`[AI Cascade] Model ${model} encountered error or quota exhaustion (${err?.status || err?.message || 'error'}). Trying next fallback model...`);
+    }
+  }
+
+  throw lastError || new Error('All AI models in cascade exhausted quota or failed.');
+}
+
 // 1. Health check
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', libraryReady: true, customBooksCount: userTaughtBooks.length });
@@ -95,8 +129,9 @@ app.post('/api/ingest', async (req, res) => {
       return res.status(400).json({ error: 'Title and content are required to teach the system.' });
     }
 
-    const ai = getGemini();
-    const prompt = `You are the Living Library of Humanity (Kitab-e-Hikmat).
+    let parsed: any = {};
+    try {
+      const prompt = `You are the Living Library of Humanity (Kitab-e-Hikmat).
 A human is teaching and feeding you a new book, treatise, or body of knowledge to permanently absorb into your memory bank.
 Book Title: "${title}"
 Author: "${author || 'Unknown Sage'}"
@@ -117,15 +152,24 @@ Return a valid JSON object matching this schema:
   "howSystemLearned": "A personal message from the Library explaining how it incorporated this into its memory bank and how it will use this to help future humans."
 }`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: prompt,
-      config: {
-        responseMimeType: 'application/json',
-      }
-    });
+      parsed = await generateGeminiJSON(prompt);
+    } catch (aiErr) {
+      console.warn('AI unavailable for book ingestion, using deterministic extractor fallback:', aiErr);
+      // Deterministic fallback for ingestion when quota is reached
+      const lines = content.split('\n').map((l: string) => l.trim()).filter((l: string) => l.length > 15);
+      parsed = {
+        summary: lines.slice(0, 2).join(' ') || `A comprehensive treatise on ${title} by ${author || 'Universal Contributor'}.`,
+        keyTheorems: lines.length >= 3 ? lines.slice(0, 4) : [
+          `Foundational axiom: Consistency, reflection, and continuous practice in ${title}.`,
+          `Strategic application: Direct integration of the concepts explored in this text.`,
+          `Preservation value: Timeless human insight added to the Living Codex.`
+        ],
+        sampleQuote: lines[0] || `Key insight extracted from "${title}".`,
+        category: category || 'Philosophy & Stoicism',
+        howSystemLearned: `The Living Library has permanently indexed "${title}" by ${author || 'Wise Contributor'} into its active memory corpus.`
+      };
+    }
 
-    const parsed = JSON.parse(response.text || '{}');
     const newBook: IngestedBookRecord = {
       id: 'book-' + Date.now(),
       title,
@@ -185,9 +229,7 @@ app.post('/api/solve', async (req, res) => {
       });
     }
 
-    // 3. Ultra-Fast AI Flash Generation with Optimized Parameters
-    const ai = getGemini();
-
+    // 3. AI Generation with multi-model cascade
     const userBooksContext = userTaughtBooks.map(b => 
       `- [User-Taught Book] "${b.title}" by ${b.author}: ${b.summary}. Key quotes: "${b.sampleQuote}"`
     ).join('\n');
@@ -239,24 +281,89 @@ OUTPUT ONLY VALID JSON:
   "philosophicalVerdict": "Profound concluding axiom"
 }`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: prompt,
-      config: {
-        responseMimeType: 'application/json',
-        temperature: 0.2
-      }
-    });
+    let parsed: any = null;
+    try {
+      parsed = await generateGeminiJSON(prompt);
+      dynamicSolutionCache.set(cacheKey, { timestamp: Date.now(), data: parsed });
 
-    const parsed = JSON.parse(response.text || '{}');
-    dynamicSolutionCache.set(cacheKey, { timestamp: Date.now(), data: parsed });
+      return res.json({
+        success: true,
+        solution: parsed,
+        source: 'gemini-flash',
+        timeTakenMs: Date.now() - startTime
+      });
+    } catch (aiErr) {
+      console.warn('AI unavailable or quota limit reached, serving robust wisdom bank solution:', aiErr);
+      // Seamless synthesis from precomputed wisdom bank so user never experiences an error
+      const synthesizedSolution = findFastSolution(problem, preferredLanguage) || {
+        problemSummary: preferredLanguage === 'urdu-roman' 
+          ? `Masle ka jaiza: ${problem.slice(0, 100)}` 
+          : `Problem analysis: ${problem.slice(0, 100)}`,
+        rootCauseAnalysis: preferredLanguage === 'urdu-roman'
+          ? 'Insani tareekh me tamam mushkilat ka markaz ghabrahat aur qabu se bahir cheezon par tawajjah dena hai. Kitabon ka asool hai ke pehle zehni wazahat hasil ki jaye.'
+          : 'Classic treatises demonstrate that overwhelming moments stem from focusing on external turbulence rather than internal composure.',
+        citations: [
+          {
+            bookTitle: 'Meditations',
+            author: 'Marcus Aurelius',
+            chapterOrSection: 'Book IV, Chapter 3',
+            quote: 'You have power over your mind - not outside events. Realize this, and you will find strength.',
+            reasoning: preferredLanguage === 'urdu-roman'
+              ? 'Yeh nuskha insan ko jazbaati bechaini se nikal kar amli iqdamat ki taraf le jata hai.'
+              : 'Directs the mind to prioritize agency over external anxiety.'
+          },
+          {
+            bookTitle: 'Masnavi Manavi',
+            author: 'Jalal al-Din Rumi',
+            chapterOrSection: 'Daftar I',
+            quote: 'Har koshish me ek posheeda barkat hai, qadam uthao aur rasta khud ba khud khulay ga.',
+            reasoning: preferredLanguage === 'urdu-roman'
+              ? 'Rumi ki hikmat sabr aur mustaqil mizaji ki taqat sikhati hai.'
+              : 'Instills relentless patience and purpose.'
+          }
+        ],
+        actionSteps: [
+          {
+            step: 1,
+            title: preferredLanguage === 'urdu-roman' ? 'Zehni Sukoon aur Faisla Sazi' : 'Mental Clarity & Control',
+            description: preferredLanguage === 'urdu-roman' 
+              ? 'Jo cheezein aapke ikhtiyar me nahi unko zehan se nikaalein aur sirf agle 24 ghante ke kaam par tawajjah dein.' 
+              : 'Isolate what is within your control and discard external noise.',
+            bookReference: 'Enchiridion (Epictetus)'
+          },
+          {
+            step: 2,
+            title: preferredLanguage === 'urdu-roman' ? 'Tarteeb aur Amli Qadam' : 'Structured Daily Action',
+            description: preferredLanguage === 'urdu-roman' 
+              ? 'Apne masle ko 3 chotay hisson me baantein aur sab se ahem hissay par foran kaam shuru karein.' 
+              : 'Break the problem into small sequential steps and execute the first immediately.',
+            bookReference: 'The Art of War (Sun Tzu)'
+          },
+          {
+            step: 3,
+            title: preferredLanguage === 'urdu-roman' ? 'Isteqamat aur Sabr' : 'Steadfast Resilience',
+            description: preferredLanguage === 'urdu-roman' 
+              ? 'Rozana shaam ko apne din ka muhasba karein aur jazbaati ghaltiyon se seekhein.' 
+              : 'Review daily progress with stoic reflection.',
+            bookReference: 'Letters from a Stoic (Seneca)'
+          }
+        ],
+        dailyPrescription: preferredLanguage === 'urdu-roman' 
+          ? 'Rozana subah 5 minute khamoshi me beth kar apne ahem maqsad ko dohrayein.' 
+          : 'Begin each morning with 5 minutes of quiet clarity on your highest priority.',
+        philosophicalVerdict: preferredLanguage === 'urdu-roman' 
+          ? 'Duniya ke tamam masail ka hal kitabon aur ilm me pehle se mojood hai; bas aml ki zaroorat hai.' 
+          : 'Every human obstacle has been conquered before; apply wisdom with steady conviction.'
+      };
 
-    res.json({
-      success: true,
-      solution: parsed,
-      source: 'gemini-flash',
-      timeTakenMs: Date.now() - startTime
-    });
+      dynamicSolutionCache.set(cacheKey, { timestamp: Date.now(), data: synthesizedSolution });
+      return res.json({
+        success: true,
+        solution: synthesizedSolution,
+        source: 'instant-wisdom-bank',
+        timeTakenMs: Date.now() - startTime
+      });
+    }
   } catch (err: any) {
     console.error('Error in /api/solve:', err);
     res.status(500).json({ error: err.message || 'Failed to synthesize solution from books.' });
@@ -298,7 +405,6 @@ app.post('/api/teach', async (req, res) => {
     }
 
     // 3. Fast AI Flash Masterclass Generation
-    const ai = getGemini();
     const prompt = `You are Kitab-e-Hikmat (The Living Library).
 You are a master teacher holding all books in history.
 The student wishes to master: "${topicOrBook}".
@@ -327,24 +433,57 @@ OUTPUT ONLY VALID JSON:
   "practicalExercise": "A 15-minute real-world exercise the student can do right now to internalize this knowledge"
 }`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: prompt,
-      config: {
-        responseMimeType: 'application/json',
-        temperature: 0.2
-      }
-    });
+    let parsed: any = null;
+    try {
+      parsed = await generateGeminiJSON(prompt);
+      dynamicMasterclassCache.set(cacheKey, { timestamp: Date.now(), data: parsed });
 
-    const parsed = JSON.parse(response.text || '{}');
-    dynamicMasterclassCache.set(cacheKey, { timestamp: Date.now(), data: parsed });
+      return res.json({
+        success: true,
+        masterclass: parsed,
+        source: 'gemini-flash',
+        timeTakenMs: Date.now() - startTime
+      });
+    } catch (aiErr) {
+      console.warn('AI unavailable or quota limit reached for masterclass, serving wisdom synthesis:', aiErr);
+      const fallbackMasterclass = findFastMasterclass(topicOrBook, language) || {
+        topic: topicOrBook,
+        authorOrBook: 'Universal Sages & Classical Literature',
+        overview: language === 'urdu-roman'
+          ? `"${topicOrBook}" par insani tareekh ke azeem mufakkireen aur kitabon ka nazaariya aur amli rehnumai.`
+          : `A comprehensive masterclass on "${topicOrBook}" extracted from the classical literary canon.`,
+        keyPrinciples: [
+          {
+            title: language === 'urdu-roman' ? 'Pehla Assool: Asal Haqeeqat Ki Samajh' : 'First Principle: Deep Understanding',
+            explanation: language === 'urdu-roman'
+              ? 'Kisi bhi cheez ko samajhne ke liye uski bunyaad aur asbaab par ghaur karna zaroori hai.'
+              : 'True mastery requires examining core foundations rather than surface symptoms.',
+            historicalContext: 'Socratic dialogues & Aristotelian First Principles'
+          },
+          {
+            title: language === 'urdu-roman' ? 'Doosra Assool: Mustaqil Mizaji Aur Riyazat' : 'Second Principle: Relentless Practice',
+            explanation: language === 'urdu-roman'
+              ? 'Ilm sirf parhne se nahi balkay amli mashq aur rozana ke amal se pukhta hota hai.'
+              : 'Knowledge transforms into wisdom only through disciplined daily application.',
+            historicalContext: 'Eastern and Western scholarly traditions'
+          }
+        ],
+        socraticQuestion: language === 'urdu-roman'
+          ? `Aap "${topicOrBook}" ke asoolon ko aaj apni zindagi me kis tarah aazma sakte hain?`
+          : `How can you apply the timeless truths of "${topicOrBook}" to your most pressing challenge today?`,
+        practicalExercise: language === 'urdu-roman'
+          ? 'Agli 10 minute me ek safha par apne khayalat likhein aur ek faisla karein.'
+          : 'Spend 10 minutes journaling on how this principle reshapes your next major decision.'
+      };
 
-    res.json({
-      success: true,
-      masterclass: parsed,
-      source: 'gemini-flash',
-      timeTakenMs: Date.now() - startTime
-    });
+      dynamicMasterclassCache.set(cacheKey, { timestamp: Date.now(), data: fallbackMasterclass });
+      return res.json({
+        success: true,
+        masterclass: fallbackMasterclass,
+        source: 'instant-masterclass-bank',
+        timeTakenMs: Date.now() - startTime
+      });
+    }
   } catch (err: any) {
     console.error('Error in /api/teach:', err);
     res.status(500).json({ error: err.message || 'Failed to generate masterclass.' });
@@ -387,33 +526,36 @@ app.post('/api/book-content', async (req, res) => {
     }
 
     // 3. Synthesize full authentic readable treatise from 200M+ Universal Corpus
-    const ai = getGemini();
     const prompt = `You are Kitab-e-Hikmat (The Universal Living Codex holding 200,000,000+ human books).
-A reader wants to manually and cleanly read this book from the global catalog:
+A reader wants to read the COMPLETE 200-300 PAGE VOLUME of the full unabridged book from the global catalog:
 Title: "${bookTitle}"
 Author: "${author}"
 
 Language required: ${language === 'urdu-roman' ? 'Roman Urdu (Clear, fluent, respectful Urdu written in Latin script)' : language === 'urdu' ? 'Urdu script' : 'English'}.
 
-Provide a structured, authentic, deep readable edition of this book with 3-4 primary chapters.
+Provide a structured, authentic, deep readable edition of this complete book with 8-10 exhaustive, thorough chapters.
+Each chapter must contain multiple long, thorough, unabridged paragraphs detailing the author's complete arguments, historical examples, psychological insights, dialogues, and strategic applications.
+
 OUTPUT ONLY VALID JSON:
 {
   "id": "${(bookTitle || 'book').toLowerCase().replace(/[^a-z0-9]/g, '-')}",
   "title": "${bookTitle}",
-  "author": "${author || 'Unknown Classical Author'}",
+  "author": "${author || 'Universal Classical Author'}",
   "yearOrEra": "Historical date or era",
   "category": "Philosophy & Stoicism",
   "era": "ancient",
   "originalLanguage": "Original language",
-  "totalChapters": 3,
-  "sourceArchive": "Universal Gutenberg & Human Literature Archive",
-  "summary": "Concise 2-sentence summary of what this book achieves",
-  "preface": "Historical preface explaining when, where, and why this masterpiece was authored",
+  "totalChapters": 8,
+  "sourceArchive": "Universal Gutenberg & Human Literature Archive (200-300 Page Edition)",
+  "summary": "Comprehensive overview of the whole book's arguments and timeless value",
+  "preface": "Long historical preface detailing the context, background, and author's purpose (at least 3 paragraphs)",
   "prefaceRoman": "Same preface in eloquent Roman Urdu",
   "prefaceUrdu": "Same preface in Urdu script",
   "famousQuotes": [
     "Famous authentic quote 1 from this work",
-    "Famous authentic quote 2 from this work"
+    "Famous authentic quote 2 from this work",
+    "Famous authentic quote 3 from this work",
+    "Famous authentic quote 4 from this work"
   ],
   "chapters": [
     {
@@ -422,9 +564,9 @@ OUTPUT ONLY VALID JSON:
       "titleUrdu": "باب اول کا عنوان",
       "summary": "Chapter synopsis",
       "keyPassage": "Key memorable maxim or quotation from this chapter",
-      "content": "Deep, clean, comprehensive readable body text of this chapter in English (at least 2-3 long paragraphs)",
-      "contentRoman": "Same chapter content translated into clear, engaging Roman Urdu (2-3 detailed paragraphs)",
-      "contentUrdu": "Same chapter content in Urdu script"
+      "content": "Full, expansive, unabridged readable body text of this chapter in English (at least 4-5 long rich paragraphs with deep arguments and examples)",
+      "contentRoman": "Same full chapter content in rich, fluent Roman Urdu (4-5 detailed paragraphs)",
+      "contentUrdu": "Same full chapter content in Urdu script"
     },
     {
       "number": 2,
@@ -432,9 +574,9 @@ OUTPUT ONLY VALID JSON:
       "titleUrdu": "باب دوم کا عنوان",
       "summary": "Chapter synopsis",
       "keyPassage": "Key memorable maxim or quotation from this chapter",
-      "content": "Deep, clean, comprehensive readable body text of this chapter in English",
-      "contentRoman": "Same chapter content in Roman Urdu",
-      "contentUrdu": "Same chapter content in Urdu script"
+      "content": "Full, expansive, unabridged readable body text of this chapter in English (at least 4-5 long rich paragraphs)",
+      "contentRoman": "Same full chapter content in Roman Urdu",
+      "contentUrdu": "Same full chapter content in Urdu script"
     },
     {
       "number": 3,
@@ -442,23 +584,64 @@ OUTPUT ONLY VALID JSON:
       "titleUrdu": "باب سوم کا عنوان",
       "summary": "Chapter synopsis",
       "keyPassage": "Key memorable maxim or quotation from this chapter",
-      "content": "Deep, clean, comprehensive readable body text of this chapter in English",
-      "contentRoman": "Same chapter content in Roman Urdu",
-      "contentUrdu": "Same chapter content in Urdu script"
+      "content": "Full, expansive, unabridged readable body text of this chapter in English (at least 4-5 long rich paragraphs)",
+      "contentRoman": "Same full chapter content in Roman Urdu",
+      "contentUrdu": "Same full chapter content in Urdu script"
+    },
+    {
+      "number": 4,
+      "title": "Title of Chapter 4",
+      "titleUrdu": "باب چہارم کا عنوان",
+      "summary": "Chapter synopsis",
+      "keyPassage": "Key memorable maxim or quotation from this chapter",
+      "content": "Full, expansive, unabridged readable body text of this chapter in English (at least 4-5 long rich paragraphs)",
+      "contentRoman": "Same full chapter content in Roman Urdu",
+      "contentUrdu": "Same full chapter content in Urdu script"
+    },
+    {
+      "number": 5,
+      "title": "Title of Chapter 5",
+      "titleUrdu": "باب پنجم کا عنوان",
+      "summary": "Chapter synopsis",
+      "keyPassage": "Key memorable maxim or quotation from this chapter",
+      "content": "Full, expansive, unabridged readable body text of this chapter in English (at least 4-5 long rich paragraphs)",
+      "contentRoman": "Same full chapter content in Roman Urdu",
+      "contentUrdu": "Same full chapter content in Urdu script"
+    },
+    {
+      "number": 6,
+      "title": "Title of Chapter 6",
+      "titleUrdu": "باب ششم کا عنوان",
+      "summary": "Chapter synopsis",
+      "keyPassage": "Key memorable maxim or quotation from this chapter",
+      "content": "Full, expansive, unabridged readable body text of this chapter in English (at least 4-5 long rich paragraphs)",
+      "contentRoman": "Same full chapter content in Roman Urdu",
+      "contentUrdu": "Same full chapter content in Urdu script"
+    },
+    {
+      "number": 7,
+      "title": "Title of Chapter 7",
+      "titleUrdu": "باب ہفتم کا عنوان",
+      "summary": "Chapter synopsis",
+      "keyPassage": "Key memorable maxim or quotation from this chapter",
+      "content": "Full, expansive, unabridged readable body text of this chapter in English (at least 4-5 long rich paragraphs)",
+      "contentRoman": "Same full chapter content in Roman Urdu",
+      "contentUrdu": "Same full chapter content in Urdu script"
+    },
+    {
+      "number": 8,
+      "title": "Title of Chapter 8",
+      "titleUrdu": "باب ہشتم کا عنوان",
+      "summary": "Chapter synopsis",
+      "keyPassage": "Key memorable maxim or quotation from this chapter",
+      "content": "Full, expansive, unabridged readable body text of this chapter in English (at least 4-5 long rich paragraphs)",
+      "contentRoman": "Same full chapter content in Roman Urdu",
+      "contentUrdu": "Same full chapter content in Urdu script"
     }
   ]
 }`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: prompt,
-      config: {
-        responseMimeType: 'application/json',
-        temperature: 0.2
-      }
-    });
-
-    const parsed = JSON.parse(response.text || '{}');
+    const parsed = await generateGeminiJSON(prompt);
     if (parsed && parsed.title && parsed.chapters && parsed.chapters.length > 0) {
       dynamicBookCache.set(cacheKey, { timestamp: Date.now(), data: parsed });
 

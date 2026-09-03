@@ -118,10 +118,25 @@ export interface BookmarkItem {
   type: 'book' | 'chapter' | 'quote';
 }
 
+export interface BookPage {
+  pageNumber: number;
+  chapterNumber?: number;
+  chapterTitle?: string;
+  chapterTitleUrdu?: string;
+  pageType: 'cover' | 'frontispiece' | 'preface' | 'toc' | 'chapter-start' | 'chapter-body' | 'epilogue' | 'appendix';
+  heading?: string;
+  content: string;
+  keyPassage?: string;
+  footnote?: string;
+  wordCount: number;
+}
+
 export interface ReaderSettings {
   fontSize: 'sm' | 'base' | 'lg' | 'xl';
   theme: 'dark' | 'sepia' | 'light' | 'midnight';
   fontFamily: 'serif' | 'sans' | 'nastaliq';
   maxWidth: 'compact' | 'standard' | 'wide';
   language: 'urdu-roman' | 'urdu' | 'en';
+  readMode: 'paginated-book' | 'continuous-full' | 'chapter';
+  twoPageSpread?: boolean;
 }
