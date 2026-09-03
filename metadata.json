@@ -1,0 +1,6 @@
+{
+  "name": "Kitab-e-Hikmat (Living Library)",
+  "description": "Universal living repository of 200M+ human books across history. Clean manual reader, full-text book viewer, bookmarks system, and downloadable books in Word, PDF, and text formats.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
